@@ -1770,4 +1770,12 @@ else
     import Base.isapprox
 end
 
+# julia #13998 single-argument min and max
+if VERSION < v"0.5.0-dev+1279"
+    min(x::Real) = x
+    max(x::Real) = x
+    minmax(x::Real) = (x, x))
+end
+
+
 end # module
