@@ -1,8 +1,40 @@
 using Compat
+import Compat.String
+import Compat.view
+@compat import Base.show
 using Base.Test
 
 v = 1
 @test_throws AssertionError @assert(v < 1)
+
+type TestCustomShowType end
+@compat function show(io::IO, ::MIME"text/plain", ::TestCustomShowType)
+    print(io, "MyTestCustomShowType")
+end
+myio = IOBuffer()
+display(TextDisplay(myio), MIME"text/plain"(), TestCustomShowType())
+@test @compat String(myio) == "MyTestCustomShowType"
+
+type TestCustomShowType2 end
+@compat Base.show(io::IO, ::MIME"text/plain", ::TestCustomShowType2) = print(io, "MyTestCustomShowType2")
+myio = IOBuffer()
+display(TextDisplay(myio), MIME"text/plain"(), TestCustomShowType2())
+@test @compat String(myio) == "MyTestCustomShowType2"
+
+type TestCustomShowType3 end
+@compat show(io::IO, ::TestCustomShowType3) = print(io, "2-Argument-show")
+myio = IOBuffer()
+display(TextDisplay(myio), TestCustomShowType3())
+@test @compat String(myio) == "2-Argument-show"
+
+immutable ParameterizedShowType{T}
+    _::T
+end
+myio = IOBuffer()
+@compat show{T}(io::IO, ::MIME"text/html", ::ParameterizedShowType{T}) =
+    print(io, "<code>::", T, "</code>")
+@compat show(myio, MIME("text/html"), ParameterizedShowType(0.0))
+@test @compat String(myio) == "<code>::Float64</code>"
 
 d = Dict{Int,Int}()
 d[1] = 1
@@ -160,21 +192,30 @@ end
 @test CartesianTest.f(1,2,3,4) == (1,2,3,4)
 @test CartesianTest.f(1,2,3,4,5) == (1,2,3,4,5)
 
-extrapath = @windows? joinpath(JULIA_HOME,"..","Git","usr","bin")*";" : ""
+extrapath = is_windows() ? joinpath(JULIA_HOME,"..","Git","usr","bin")*";" : ""
 @compat withenv("PATH" => extrapath * ENV["PATH"]) do
-    @test readstring(pipeline(`echo hello`, `sort`)) == "hello\n"
-    @test success(pipeline(`true`, `true`))
+    cmd1 = pipeline(`echo hello`, `sort`)
+    cmd2 = pipeline(`true`, `true`)
+    if is_windows()
+        try # use busybox-w32
+            success(`busybox`)
+            cmd1 = pipeline(`busybox echo hello`, `busybox sort`)
+            cmd2 = pipeline(`busybox true`, `busybox true`)
+        end
+    end
+    @test readstring(cmd1) == "hello\n"
+    @test success(cmd2)
 end
 
 let convert_funcs_and_types =
-    ((integer, :Integer), (signed, :Signed), (unsigned, :Unsigned),
-     (int, :Int), (int8, :Int8), (int16, :Int16), (int32, :Int32),
-     (int64, :Int64), (int128, :Int128), (uint, :UInt),
-     (uint8, :UInt8), (uint16, :UInt16), (uint32, :UInt32),
-     (uint64, :UInt64), (uint128, :UInt128),
-     (float16, :Float16), (float32, :Float32), (float64, :Float64),
-     (complex32,:Complex32), (complex64,:Complex64),(complex128,:Complex128),
-     (char,:Char))
+    ((:integer, :Integer), (:signed, :Signed), (:unsigned, :Unsigned),
+     (:int, :Int), (:int8, :Int8), (:int16, :Int16), (:int32, :Int32),
+     (:int64, :Int64), (:int128, :Int128), (:uint, :UInt),
+     (:uint8, :UInt8), (:uint16, :UInt16), (:uint32, :UInt32),
+     (:uint64, :UInt64), (:uint128, :UInt128),
+     (:float16, :Float16), (:float32, :Float32), (:float64, :Float64),
+     (:complex32,:Complex32), (:complex64,:Complex64),(:complex128,:Complex128),
+     (:char,:Char))
 
     for (df,t) in convert_funcs_and_types
         x = @compat UInt8(10)
@@ -186,14 +227,14 @@ let convert_funcs_and_types =
             @test typeof(r1) === ty
         end
         if VERSION <  v"0.4.0-dev+3732"
-            r2 = df(x)
+            r2 = eval(df)(x)
             @test r1 === r2
             if t === :Signed || t === :Complex32
                 continue
             end
             x = fill(x, 10)
             r1 = eval(:(@compat map($t, $x)))
-            r2 = df(x)
+            r2 = eval(df)(x)
             @test r1 == r2
             @test typeof(r1) === typeof(r2)
         end
@@ -226,6 +267,8 @@ if VERSION < v"0.4.0-dev+3609"
     end
 end
 
+@test fieldoffset(Complex{Float32}, 2) === @compat UInt(4)
+
 @test parse(Int8, '9') == convert(Int8, 9)
 @test parse(Int, 'a', 16) == 10
 @test parse(Int, "200") == 200
@@ -244,20 +287,27 @@ end
 @test get(tryparse(Int64, "1")) == 1
 @test isa(tryparse(Int64, "a"), Nullable{Int64})
 
+@test_throws ArgumentError tryparse(Int32, "0", 1)
+@test tryparse(Int32, "12345", 16) === Nullable{Int32}(@compat Int32(74565))
+@test tryparse(Int64, "12345", 10) === Nullable{Int64}(@compat Int64(12345))
+@test tryparse(Int64, "12345", 6) === Nullable{Int64}(@compat Int64(1865))
+@test isnull(tryparse(Int64, "nonsense", 10))
+@test tryparse(Int64, "nonsense", 36) === Nullable{Int64}(@compat Int64(1856056985582))
+
 # Make sure exports from Libc and Libdl are defined
-for x in [:strftime,:systemsleep,:getpid,:FILE,:malloc,:flush_cstdio,:realloc,:strptime,:Libc,:errno,:msync,:TmStruct,:calloc,:time,:strerror,:gethostname,:free]
-    Libc.(x)
+for x in [:strftime,:systemsleep,:getpid,:FILE,:malloc,:flush_cstdio,:realloc,:strptime,:Libc,:errno,:TmStruct,:calloc,:time,:strerror,:gethostname,:free]
+    getfield(Libc, x)
 end
 for x in [:RTLD_LOCAL,:RTLD_GLOBAL,:find_library,:dlsym,:RTLD_LAZY,:RTLD_NODELETE,:DL_LOAD_PATH,:RTLD_NOW,:Libdl,:dlext,:dlsym_e,:RTLD_FIRST,:dlopen,:dllist,:dlpath,:RTLD_NOLOAD,:dlclose,:dlopen_e,:RTLD_DEEPBIND]
-    Libdl.(x)
+    getfield(Libdl, x)
 end
 
 # Test unsafe_convert
-type A; end
+type Au_c; end
 x = "abc"
-@test bytestring(Compat.unsafe_convert(Ptr{UInt8}, x)) == x
-Compat.unsafe_convert(::Ptr{A}, x) = x
-@test Compat.unsafe_convert(pointer([A()]), 1) == 1
+@test @compat String(unsafe_string(Compat.unsafe_convert(Ptr{UInt8}, x))) == x
+Compat.unsafe_convert(::Ptr{Au_c}, x) = x
+@test Compat.unsafe_convert(pointer([Au_c()]), 1) == 1
 
 # Test Ptr{T}(0)
 @test @compat(Ptr{Int}(0)) == C_NULL
@@ -352,57 +402,66 @@ end
 # qr, qrfact, qrfact!
 let A = [1.0 2.0; 3.0 4.0]
     Q, R = qr(A, Val{false})
-    @test_approx_eq Q*R A
+    @test Q*R ≈ A
     Q, R, p = qr(A, Val{true})
-    @test_approx_eq Q*R A[:,p]
+    @test Q*R ≈ A[:,p]
     F = qrfact(A, Val{false})
-    @test_approx_eq F[:Q]*F[:R] A
+    @test F[:Q]*F[:R] ≈ A
     F = qrfact(A, Val{true})
-    @test_approx_eq F[:Q]*F[:R] A[:,F[:p]]
+    @test F[:Q]*F[:R] ≈ A[:,F[:p]]
     A_copy = copy(A)
     F = qrfact!(A_copy, Val{false})
-    @test_approx_eq F[:Q]*F[:R] A
+    @test F[:Q]*F[:R] ≈ A
     A_copy = copy(A)
     F = qrfact!(A_copy, Val{true})
-    @test_approx_eq F[:Q]*F[:R] A[:,F[:p]]
+    @test F[:Q]*F[:R] ≈ A[:,F[:p]]
 end
 
 # Cstring
-let s = "foo", w = wstring("foo")
-    @test reinterpret(Ptr{Cchar}, Compat.unsafe_convert(Cstring, s)) == pointer(s)
-    @test reinterpret(Ptr{Cwchar_t}, Compat.unsafe_convert(Cwstring, w)) == pointer(w)
+let s = "foo"
+    # note: need cconvert in 0.5 because of JuliaLang/julia#16893
+    @test reinterpret(Ptr{Cchar}, Compat.unsafe_convert(Cstring, VERSION < v"0.4" ? s : Base.cconvert(Cstring, s))) == pointer(s)
+    if VERSION < v"0.5.0-dev+4859"
+        let w = wstring("foo")
+            @test reinterpret(Ptr{Cwchar_t}, Compat.unsafe_convert(Cwstring, w)) == pointer(w)
+        end
+    end
 end
 
 # fma and muladd
 @test fma(3,4,5) == 3*4+5 == muladd(3,4,5)
 
-# is_valid_utf32
-s = utf32("abc")
-@test isvalid(s)
-s = utf32(UInt32[65,0x110000])
-@test !isvalid(s)
-
-# isvalid
-let s = "abcdef", u8 = "abcdef\uff", u16 = utf16(u8), u32 = utf32(u8),
-    bad32 = utf32(UInt32[65,0x110000]), badch = Char[0x110000][1]
-
-    @test !isvalid(bad32)
-    @test !isvalid(badch)
+if VERSION < v"0.5.0-dev+5271"
+    # is_valid_utf32
+    s = utf32("abc")
     @test isvalid(s)
-    @test isvalid(u8)
-    @test isvalid(u16)
-    @test isvalid(u32)
-    @test isvalid(ASCIIString, s)
-    @test isvalid(UTF8String,  u8)
-    @test isvalid(UTF16String, u16)
-    @test isvalid(UTF32String, u32)
+    s = utf32(UInt32[65,0x110000])
+    @test !isvalid(s)
+
+    # isvalid
+    let s = "abcdef", u8 = "abcdef\uff", u16 = utf16(u8), u32 = utf32(u8),
+        bad32 = utf32(UInt32[65,0x110000]), badch = Char[0x110000][1]
+
+        @test !isvalid(bad32)
+        @test !isvalid(badch)
+        @test isvalid(s)
+        @test isvalid(u8)
+        @test isvalid(u16)
+        @test isvalid(u32)
+        @test isvalid(Compat.ASCIIString, s)
+        @test isvalid(Compat.UTF8String,  u8)
+        @test isvalid(UTF16String, u16)
+        @test isvalid(UTF32String, u32)
+    end
 end
 
-# chol
-let A = rand(2,2)
-    B = A'*A
-    U = @compat chol(B, Val{:U})
-    @test_approx_eq U'*U B
+if VERSION < v"0.5.0-dev+907"
+    # chol
+    let A = rand(2,2)
+        B = A'*A
+        U = @compat chol(B, Val{:U})
+        @test U'*U ≈ B
+    end
 end
 
 # @generated
@@ -417,8 +476,9 @@ if VERSION > v"0.3.99"
 end
 
 # Timer
-let c = 0, f, t
+let c = 0, f, g, t
     @compat f(t::Timer) = (c += 1)
+    @compat g(t::Base.Timer) = (c += 1)
     t = Timer(f, 0.0, 0.05)
     sleep(0.05)
     @test c >= 1
@@ -429,6 +489,10 @@ let c = 0, f, t
     val = c
     sleep(0.1)
     @test val == c
+    t = Timer(g, 0.0, 0.05)
+    sleep(0.05)
+    @test c >= 2
+    close(t)
 end
 
 # MathConst -> Irrational
@@ -464,7 +528,7 @@ Compat.@irrational mathconst_one 1.0 big(1.)
 @test @compat typeof(Array{Rational{Int}}(2,2,2,2,2)) == Array{Rational{Int},5}
 @test @compat size(Array{Rational{Int}}(2,2,2,2,2)) == (2,2,2,2,2)
 
-@compat utf8(Mmap.mmap(@__FILE__(),Vector{UInt8},11,1)) == "sing Compat"
+@compat String(Mmap.mmap(@__FILE__(),Vector{UInt8},11,1)) == "sing Compat"
 
 @test base64encode("hello world") == "aGVsbG8gd29ybGQ="
 
@@ -667,10 +731,10 @@ mktempdir() do dir
 
         for text in [
             old_text,
-            convert(UTF8String, Char['A' + i % 52 for i in 1:(div(SZ_UNBUFFERED_IO,2))]),
-            convert(UTF8String, Char['A' + i % 52 for i in 1:(    SZ_UNBUFFERED_IO -1)]),
-            convert(UTF8String, Char['A' + i % 52 for i in 1:(    SZ_UNBUFFERED_IO   )]),
-            convert(UTF8String, Char['A' + i % 52 for i in 1:(    SZ_UNBUFFERED_IO +1)])
+            convert(Compat.UTF8String, Char['A' + i % 52 for i in 1:(div(SZ_UNBUFFERED_IO,2))]),
+            convert(Compat.UTF8String, Char['A' + i % 52 for i in 1:(    SZ_UNBUFFERED_IO -1)]),
+            convert(Compat.UTF8String, Char['A' + i % 52 for i in 1:(    SZ_UNBUFFERED_IO   )]),
+            convert(Compat.UTF8String, Char['A' + i % 52 for i in 1:(    SZ_UNBUFFERED_IO +1)])
         ]
 
             write(filename, text)
@@ -785,9 +849,757 @@ mktempdir() do dir
         verbose && println("$name write(::IOBuffer, ...)")
         @compat to = IOBuffer(UInt8[convert(UInt8, _) for _ in text], false, true)
         write(to, io())
-        @test takebuf_string(to) == text
+        @test String(take!(to)) == text
 
         cleanup()
     end
 
+
+# https://github.com/JuliaLang/julia/pull/13232
+
+setprecision(BigFloat, 100)
+@test precision(BigFloat) == 100
+setprecision(256)
+@test precision(BigFloat) == 256
+
+setprecision(BigFloat, 100) do
+    a = big(pi)
+    @test precision(a) == 100
 end
+
+setprecision(130) do
+    a = big(pi)
+    @test precision(a) == 130
+end
+
+for T in (BigFloat, Float64)
+    setrounding(T, RoundDown)
+    @test rounding(T) == RoundDown
+    setrounding(T, RoundNearest)
+
+    setrounding(T, RoundUp) do
+        @test rounding(T) == RoundUp
+    end
+end
+
+end
+
+@test typeof(displaysize()) == @compat(Tuple{Int, Int})
+
+@test Compat.LinAlg.checksquare(randn(4,4)) == 4
+@test Compat.LinAlg.checksquare(randn(4,4), randn(3,3)) == [4,3]
+@test_throws DimensionMismatch Compat.LinAlg.checksquare(randn(4,3))
+
+@test issymmetric([1 2 3; 2 2 3; 3 3 2])
+@test !issymmetric([1 3 3; 2 2 3; 3 3 2])
+
+let X = randn(10,2), Y = randn(10,2), x = randn(10), y = randn(10)
+    for b in (true, false)
+        if VERSION < v"0.5.0-dev+679"
+            @test cov(x, b) == cov(x, corrected=b)
+        end
+        for d in (1, 2)
+            @test size(cov(X, d), 1) == 8*d - 6
+            @test size(cov(X, d, b), 1) == 8*d - 6
+            @test size(cov(X, Y, d), 1) == 8*d - 6
+            @test size(cov(X, Y, d, b), 1) == 8*d - 6
+
+            @test size(cor(X, d), 1) == 8*d - 6
+            @test size(cor(X, Y, d), 1) == 8*d - 6
+        end
+    end
+end
+
+# foreach
+let
+    a = Any[]
+    foreach(()->push!(a,0))
+    @test a == [0]
+    a = Any[]
+    foreach(x->push!(a,x), [1,5,10])
+    @test a == [1,5,10]
+    a = Any[]
+    foreach((args...)->push!(a,args), [2,4,6], [10,20,30])
+    @test a == [(2,10),(4,20),(6,30)]
+end
+
+@test istextmime("text/html") && !istextmime("image/png")
+
+module CallTest
+
+using Base.Test, Compat
+
+immutable A
+    a
+end
+
+immutable B{T}
+    b::T
+end
+
+if VERSION >= v"0.4"
+    @compat (::Type{A})() = A(1)
+    @compat (::Type{B})() = B{Int}()
+    @compat (::Type{B{T}}){T}() = B{T}(zero(T))
+
+    @compat (a::A)() = a.a
+    @compat (a::A)(b) = (a.a, b)
+    @compat (a::A)(b, c; d=2) = (a.a, b, c, d)
+    @compat (b::B{T}){T}() = b.b, T
+    @compat (b::B{T}){T}(c::T) = 1
+    @compat (b::B{T}){T,T2}(c::T2) = 0
+    @compat (b::B{T}){T}(c::T, d; f=1) = (c, d, f)
+
+    @test A() === A(1)
+    @test B() === B(0)
+    @test B{Float64}() === B(0.0)
+
+    @test A(1)() === 1
+    @test A(1)(2) === (1, 2)
+    @test A(1)(2, 3; d=10) === (1, 2, 3, 10)
+    @test B(0)() === (0, Int)
+    @test B(0)(1) === 1
+    @test B(0)(1, 2; f=100) === (1, 2, 100)
+    @test B(0)(1.0) === 0
+end
+
+end
+
+# walkdir
+
+dirwalk = mktempdir()
+cd(dirwalk) do
+    for i=1:2
+        mkdir("sub_dir$i")
+        open("file$i", "w") do f end
+
+        mkdir(joinpath("sub_dir1", "subsub_dir$i"))
+        touch(joinpath("sub_dir1", "file$i"))
+    end
+    touch(joinpath("sub_dir2", "file_dir2"))
+    has_symlinks = is_unix() ? true : (isdefined(Base, :WINDOWS_VISTA_VER) && Base.windows_version() >= Base.WINDOWS_VISTA_VER)
+    follow_symlink_vec = has_symlinks ? [true, false] : [false]
+    has_symlinks && symlink(abspath("sub_dir2"), joinpath("sub_dir1", "link"))
+    for follow_symlinks in follow_symlink_vec
+        task = walkdir(".", follow_symlinks=follow_symlinks)
+        root, dirs, files = consume(task)
+        @test root == "."
+        @test dirs == ["sub_dir1", "sub_dir2"]
+        @test files == ["file1", "file2"]
+
+        root, dirs, files = consume(task)
+        @test root == joinpath(".", "sub_dir1")
+        @test dirs == (has_symlinks ? ["link", "subsub_dir1", "subsub_dir2"] : ["subsub_dir1", "subsub_dir2"])
+        @test files == ["file1", "file2"]
+
+        root, dirs, files = consume(task)
+        if follow_symlinks
+            @test root == joinpath(".", "sub_dir1", "link")
+            @test dirs == []
+            @test files == ["file_dir2"]
+            root, dirs, files = consume(task)
+        end
+        for i=1:2
+            @test root == joinpath(".", "sub_dir1", "subsub_dir$i")
+            @test dirs == []
+            @test files == []
+            root, dirs, files = consume(task)
+        end
+
+        @test root == joinpath(".", "sub_dir2")
+        @test dirs == []
+        @test files == ["file_dir2"]
+    end
+
+    for follow_symlinks in follow_symlink_vec
+        task = walkdir(".", follow_symlinks=follow_symlinks, topdown=false)
+        root, dirs, files = consume(task)
+        if follow_symlinks
+            @test root == joinpath(".", "sub_dir1", "link")
+            @test dirs == []
+            @test files == ["file_dir2"]
+            root, dirs, files = consume(task)
+        end
+        for i=1:2
+            @test root == joinpath(".", "sub_dir1", "subsub_dir$i")
+            @test dirs == []
+            @test files == []
+            root, dirs, files = consume(task)
+        end
+        @test root == joinpath(".", "sub_dir1")
+        @test dirs ==  (has_symlinks ? ["link", "subsub_dir1", "subsub_dir2"] : ["subsub_dir1", "subsub_dir2"])
+        @test files == ["file1", "file2"]
+
+        root, dirs, files = consume(task)
+        @test root == joinpath(".", "sub_dir2")
+        @test dirs == []
+        @test files == ["file_dir2"]
+
+        root, dirs, files = consume(task)
+        @test root == "."
+        @test dirs == ["sub_dir1", "sub_dir2"]
+        @test files == ["file1", "file2"]
+    end
+    #test of error handling
+    task_error = walkdir(".")
+    task_noerror = walkdir(".", onerror=x->x)
+    root, dirs, files = consume(task_error)
+    @test root == "."
+    @test dirs == ["sub_dir1", "sub_dir2"]
+    @test files == ["file1", "file2"]
+
+    rm(joinpath("sub_dir1"), recursive=true)
+    @test_throws SystemError consume(task_error) # throws an error because sub_dir1 do not exist
+
+    root, dirs, files = consume(task_noerror)
+    @test root == "."
+    @test dirs == ["sub_dir1", "sub_dir2"]
+    @test files == ["file1", "file2"]
+
+    root, dirs, files = consume(task_noerror) # skips sub_dir1 as it no longer exist
+    @test root == joinpath(".", "sub_dir2")
+    @test dirs == []
+    @test files == ["file_dir2"]
+
+end
+rm(dirwalk, recursive=true)
+
+# RemoteChannel/Future
+r = remotecall(sin, 1, pi/3)
+@compat foo(r::Future) = 7
+@test foo(r) == 7
+
+@compat rc = RemoteChannel()
+@compat rc = RemoteChannel(myid())
+
+@compat rc = Future()
+@compat rc = Future(myid())
+
+# @functorize
+function checkfunc(Fun, func)
+    if VERSION >= v"0.5.0-dev+3701"
+        @eval @test @functorize($(func)) === Base.$(func)
+    else
+        if isdefined(Base, Fun)
+            @eval @test isa(@functorize($(func)), Base.$(Fun))
+        else
+            @eval @test isa(@functorize($(func)), Function)
+            @eval @test @functorize($(func)) === Base.$(func)
+        end
+    end
+end
+
+for (Fun, func) in [(:IdFun,                   :identity),
+                    (:AbsFun,                  :abs),
+                    (:Abs2Fun,                 :abs2),
+                    (:ExpFun,                  :exp),
+                    (:LogFun,                  :log),
+                    (:ConjFun,                 :conj)]
+    begin
+        if isdefined(Base, func)
+            checkfunc(Fun, func)
+            a = rand(1:10, 10)
+            @eval @test mapreduce($(func), +, $(a)) == mapreduce(@functorize($(func)), +, $(a))
+        end
+    end
+end
+
+dotfunctors = [(:DotAddFun,           :.+),
+               (:DotSubFun,           :.-),
+               (:DotMulFun,           :.*),
+               (:DotRDivFun,          :./),
+               (:DotIDivFun,          @compat(Symbol(".÷"))),
+               (:DotRemFun,           :.%),
+               (:DotLSFun,            :.<<),
+               (:DotRSFun,            :.>>)]
+
+functors    = [(:AndFun,              :&),
+               (:OrFun,               :|),
+               (:XorFun,              :⊻),
+               (:AddFun,              :+),
+               (:SubFun,              :-),
+               (:MulFun,              :*),
+               (:RDivFun,             :/),
+               (:LDivFun,             :\ ),
+               (:IDivFun,             :div),
+               (:ModFun,              :mod),
+               (:RemFun,              :rem),
+               (:PowFun,              :^),
+               (:MaxFun,              :scalarmax),
+               (:MinFun,              :scalarmin),
+               (:LessFun,             :<),
+               (:MoreFun,             :>),
+               (:ElementwiseMaxFun,   :max),
+               (:ElementwiseMinFun,   :min)]
+
+# since #17623, dot functions are no longer function objects
+if VERSION < v"0.6.0-dev.1614"
+    append!(functors, dotfunctors)
+end
+
+for (Fun, func) in functors
+    begin
+        if isdefined(Base, func) && (func !== :.>> || VERSION >= v"0.4.0-dev+553") && (func !== :.% || VERSION >= v"0.5.0-dev+1472")
+            checkfunc(Fun, func)
+            a = rand(1:10, 10)
+            @eval @test mapreduce(identity, Base.$(func), $(a)) == mapreduce(identity, @functorize($(func)), $(a))
+        end
+    end
+end
+
+if VERSION >= v"0.5.0-dev+3701"
+    @test @functorize(complex) === complex
+    @test @functorize(dot) === dot
+else
+    if isdefined(Base, :SparseArrays) && isdefined(Base.SparseArrays, :ComplexFun)
+        @test isa(@functorize(complex), Base.SparseArrays.ComplexFun)
+        @test isa(@functorize(dot), Base.SparseArrays.DotFun)
+    else
+        @test isa(@functorize(complex), Function)
+        @test isa(@functorize(dot), Function)
+        @test @functorize(complex) === complex
+        @test @functorize(dot) === dot
+    end
+end
+let a = rand(1:10, 10)
+    @test mapreduce(identity, dot, a) == mapreduce(identity, @functorize(dot), a)
+end
+@test isa(@functorize(centralizedabs2fun)(1), @functorize(centralizedabs2fun))
+@test isa(@functorize(centralizedabs2fun)(1.0), @functorize(centralizedabs2fun))
+let a = rand(1:10, 10)
+    @eval @test mapreduce(x -> abs2(x - 1), +, $(a)) == mapreduce(@functorize(centralizedabs2fun)(1), +, $(a))
+end
+
+# Threads.@threads
+using Compat.Threads
+@threads for i=1:10
+    @test true
+end
+
+# Issue #223
+@test 1 == threadid() <= nthreads()
+
+@test @compat(Symbol("foo")) === :foo
+@test @compat(Symbol("foo", "bar")) === :foobar
+@test @compat(Symbol("a_", 2)) === :a_2
+@test @compat(Symbol('c')) === :c
+@test @compat(Symbol(1)) === @compat(Symbol("1"))
+
+@test @compat(Base.:+) == +
+let x = rand(3), y = rand(3)
+    @test @compat(sin.(cos.(x))) == map(x -> sin(cos(x)), x)
+    @test @compat(atan2.(sin.(y),x)) == broadcast(atan2,map(sin,y),x)
+end
+let x0 = Array(Float64), v, v0
+    x0[1] = rand()
+    v0 = @compat sin.(x0)
+    @test isa(v0, Array{Float64,0})
+    v = @compat sin.(x0[1])
+    @test isa(v, Float64)
+    @test v == v0[1] == sin(x0[1])
+end
+let x = rand(2, 2), v
+    v = @compat sin.(x)
+    @test isa(v, Array{Float64,2})
+    @test v == [sin(x[1, 1]) sin(x[1, 2]);
+                sin(x[2, 1]) sin(x[2, 2])]
+end
+let x1 = [1, 2, 3], x2 = ([3, 4, 5],), v
+    v = @compat atan2.(x1, x2...)
+    @test isa(v, Vector{Float64})
+    @test v == [atan2(1, 3), atan2(2, 4), atan2(3, 5)]
+end
+# Do the following in global scope to make sure inference is able to handle it
+@test @compat(sin.([1, 2])) == [sin(1), sin(2)]
+@test isa(@compat(sin.([1, 2])), Vector{Float64})
+@test @compat(atan2.(1, [2, 3])) == [atan2(1, 2), atan2(1, 3)]
+@test isa(@compat(atan2.(1, [2, 3])), Vector{Float64})
+@test @compat(atan2.([1, 2], [2, 3])) == [atan2(1, 2), atan2(2, 3)]
+@test isa(@compat(atan2.([1, 2], [2, 3])), Vector{Float64})
+# And make sure it is actually inferrable
+f15032(a) = @compat sin.(a)
+@inferred f15032([1, 2, 3])
+@inferred f15032([1.0, 2.0, 3.0])
+
+if VERSION ≥ v"0.4.0-dev+3732"
+    @test Symbol("foo") === :foo
+    @test Symbol("foo", "bar") === :foobar
+    @test Symbol("a_", 2) === :a_2
+    @test Symbol('c') === :c
+    @test Symbol(1) === Symbol("1")
+end
+
+foostring(::String) = 1
+@test foostring("hello") == 1
+@test foostring("λ") == 1
+@test isa("hello", Compat.ASCIIString)
+@test isa("λ", Compat.UTF8String)
+
+let async, c = false
+    run = Condition()
+    async = Compat.AsyncCondition(x->(c = true; notify(run)))
+    ccall(:uv_async_send, Void, (Ptr{Void},), async.handle)
+    wait(run)
+    @test c
+end
+
+let async, c = false
+    async = Compat.AsyncCondition()
+    started = Condition()
+    task = @schedule begin
+        notify(started)
+        wait(async)
+        true
+    end
+    wait(started)
+    ccall(:uv_async_send, Void, (Ptr{Void},), async.handle)
+    @test wait(task)
+end
+
+let io = IOBuffer(), s = "hello"
+    unsafe_write(io, pointer(s), length(s))
+    @test String(take!(io)) == s
+end
+
+@static if VERSION ≥ v"0.4"
+    @test VERSION ≥ v"0.4"
+else
+    @test VERSION < v"0.4"
+end
+
+let io = IOBuffer(), s = "hello"
+    @test @compat String(Vector{UInt8}(s)) == s
+    write(io, s)
+    @test @compat String(io) == s
+    @test unsafe_string(pointer(s)) == s
+    @test unsafe_string(pointer(s),sizeof(s)) == s
+    @test string(s, s, s) == "hellohellohello"
+    @test @compat(String(s)) == s
+    @test String == @compat(Union{Compat.UTF8String,Compat.ASCIIString})
+end
+
+@test Compat.repeat(1:2, inner=2) == [1, 1, 2, 2]
+@test Compat.repeat(1:2, outer=[2]) == [1, 2, 1, 2]
+@test Compat.repeat([1,2], inner=(2,)) == [1, 1, 2, 2]
+
+if VERSION < v"0.5.0-dev+4267"
+    if OS_NAME == :Windows
+        @test is_windows()
+    elseif OS_NAME == :Darwin
+        @test is_apple() && is_bsd() && is_unix()
+    elseif OS_NAME == :FreeBSD
+        @test is_bsd() && is_unix()
+    elseif OS_NAME == :Linux
+        @test is_linux() && is_unix()
+    end
+else
+    @test Compat.KERNEL == Sys.KERNEL
+end
+
+io = IOBuffer()
+@test @compat(get(io, :limit, false)) == false
+@test @compat(get(io, :compact, false)) == false
+@test @compat(get(io, :multiline, false)) == false
+@test @compat(get(Nullable(1))) == 1
+
+let
+    test_str = "test"
+    ptr = pointer(test_str)
+    wrapped_str = if VERSION < v"0.6.0-dev.1988"
+        unsafe_wrap(Compat.String, ptr)
+    else
+        unsafe_string(ptr)
+    end
+    new_str = unsafe_string(ptr)
+    cstr = convert(Cstring, ptr)
+    new_str2 = unsafe_string(cstr)
+    @test wrapped_str == "test"
+    @test new_str == "test"
+    @test new_str2 == "test"
+    if VERSION < v"0.6.0-dev.1988"
+        # Test proper pointer aliasing behavior, which is not possible in 0.6
+        # with the new String representation
+        @test ptr == pointer(wrapped_str)
+    end
+    @test ptr ≠ pointer(new_str)
+    @test ptr ≠ pointer(new_str2)
+    @test unsafe_string(convert(Ptr{Int8}, ptr)) == "test"
+    if VERSION < v"0.6.0-dev.1988"
+        @test unsafe_wrap(Compat.String, convert(Ptr{Int8}, ptr)) == "test"
+    end
+    x = [1, 2]
+    @test unsafe_wrap(Array, pointer(x), 2) == [1, 2]
+end
+
+@test allunique([1, 2, 3])
+@test !allunique([1, 2, 1])
+@test allunique(1:3)
+@test allunique(FloatRange(0.0, 0.0, 0.0, 1.0))
+@test !allunique(FloatRange(0.0, 0.0, 2.0, 1.0))
+
+# Add test for Base.view
+let a = rand(10,10)
+    @test view(a, :, 1) == a[:,1]
+end
+
+
+# 0.5 style single argument `@boundscheck`
+@inline function do_boundscheck()
+    # A bit ugly since `@boundscheck` returns `nothing`.
+    checked = false
+    @compat @boundscheck (checked = true;)
+    checked
+end
+@test do_boundscheck() == true
+
+@test Compat.promote_eltype_op(@functorize(+), ones(2,2), 1) === Float64
+@test Compat.promote_eltype_op(@functorize(*), ones(Int, 2), zeros(Int16,2)) === Int
+
+#Add test for Base.normalize and Base.normalize!
+let
+    vr = [3.0, 4.0]
+    for Tr in (Float32, Float64)
+        for T in (Tr, Complex{Tr})
+            v = convert(Vector{T}, vr)
+            @test norm(v) == 5.0
+            w = normalize(v)
+            @test norm(w - [0.6, 0.8], Inf) < eps(Tr)
+            @test isapprox(norm(w), 1.0)
+            @test norm(normalize!(copy(v)) - w, Inf) < eps(Tr)
+            @test isempty(normalize!(T[]))
+        end
+    end
+end
+
+#Test potential overflow in normalize!
+let
+    δ = inv(prevfloat(typemax(Float64)))
+    v = [δ, -δ]
+    if VERSION > v"0.4.0-pre+7164"
+        @test norm(v) === 7.866824069956793e-309
+    end
+    w = normalize(v)
+    if VERSION > v"0.4.0-pre+7164"
+        @test w ≈ [1/√2, -1/√2]
+        @test isapprox(norm(w), 1.0)
+    end
+    @test norm(normalize!(v) - w, Inf) < eps()
+end
+
+# JuliaLang/julia#16603
+@test sprint(join, [1, 2, 3]) == "123"
+@test sprint(join, [1, 2, 3], ',') == "1,2,3"
+@test sprint(join, [1, 2, 3], ", ", ", and ") == "1, 2, and 3"
+@test sprint(escape_string, "xyz\n", "z") == "xy\\z\\n"
+@test sprint(unescape_string, "xyz\\n") == "xyz\n"
+
+# three-argument show from JuliaLang/julia#16563
+@test sprint(show, "text/plain", 1) == stringmime("text/plain", 1)
+
+let n=5, a=rand(n), incx=1, b=rand(n), incy=1
+    ccall((Compat.@blasfunc(dcopy_), Base.LinAlg.BLAS.libblas), Void,
+          (Ptr{Base.LinAlg.BLAS.BlasInt}, Ptr{Float64}, Ptr{Base.LinAlg.BLAS.BlasInt}, Ptr{Float64}, Ptr{Base.LinAlg.BLAS.BlasInt}),
+          &n, a, &incx, b, &incy)
+    @test a == b
+end
+
+# do-block redirect_std*
+let filename = tempname()
+    ret = open(filename, "w") do f
+        redirect_stdout(f) do
+            println("hello")
+            [1,3]
+        end
+    end
+    @test ret == [1,3]
+    @test chomp(readstring(filename)) == "hello"
+    ret = open(filename, "w") do f
+        redirect_stderr(f) do
+            println(STDERR, "WARNING: hello")
+            [2]
+        end
+    end
+    @test ret == [2]
+    @test contains(readstring(filename), "WARNING: hello")
+    ret = open(filename) do f
+        redirect_stdin(f) do
+            readline()
+        end
+    end
+    @test contains(ret, "WARNING: hello")
+    rm(filename)
+end
+
+@test @__DIR__() == dirname(@__FILE__)
+
+# PR #17302
+# To be removed when 0.5/0.6 support is dropped.
+f17302(a::Number) = a
+f17302(a::Number, b::Number) = a + b
+Compat.@dep_vectorize_1arg Real f17302
+Compat.@dep_vectorize_2arg Real f17302
+@test_throws MethodError f17302([1im])
+@test_throws MethodError f17302([1im], [1im])
+mktemp() do fname, f
+    redirect_stderr(f) do
+        @test f17302([1.0]) == [1.0]
+        @test f17302(1.0, [1]) == [2.0]
+        @test f17302([1.0], 1) == [2.0]
+        @test f17302([1.0], [1]) == [2.0]
+    end
+end
+
+# 0.5.0-dev+4677
+for A in (Hermitian(randn(5,5) + 10I),
+          Symmetric(randn(5,5) + 10I),
+          Symmetric(randn(5,5) + 10I, :L))
+    F = cholfact(A)
+    @test F[:U]'F[:U]  ≈ A
+    @test F[:L]*F[:L]' ≈ A
+
+    Ac = copy(A)
+    F = cholfact!(Ac)
+    @test F[:U]'F[:U]  ≈ A
+    @test F[:L]*F[:L]' ≈ A
+
+    @test istriu(chol(A))
+    @test chol(A) ≈ F[:U]
+
+    F = cholfact(A, Val{true})
+    @test F[:U]'F[:U]  ≈ A[F[:p], F[:p]]
+    @test F[:L]*F[:L]' ≈ A[F[:p], F[:p]]
+    Ac = copy(A)
+    F = cholfact!(Ac, Val{true})
+    @test F[:U]'F[:U]  ≈ A[F[:p], F[:p]]
+    @test F[:L]*F[:L]' ≈ A[F[:p], F[:p]]
+end
+
+types = [
+    Bool,
+    Float16,
+    Float32,
+    Float64,
+    Int128,
+    Int16,
+    Int32,
+    Int64,
+    Int8,
+    UInt16,
+    UInt32,
+    UInt64,
+    UInt8,
+]
+for T in types
+    # julia#18510, Nullable constructors
+    x = @compat Nullable(one(T), true)
+    @test isnull(x) === false
+    @test isa(x.value, T)
+    @test eltype(x) === T
+
+    x = @compat Nullable{T}(one(T), true)
+    y = @compat Nullable{Any}(one(T), true)
+    @test isnull(x) === false
+    @test isnull(y) === false
+    @test isa(x.value, T)
+    @test eltype(x) === T
+    @test eltype(y) === Any
+
+    x = @compat Nullable{T}(one(T), false)
+    y = @compat Nullable{Any}(one(T), false)
+    @test isnull(x) === true
+    @test isnull(y) === true
+    @test eltype(x) === T
+    @test eltype(y) === Any
+
+    x = @compat Nullable(one(T), false)
+    @test isnull(x) === true
+    @test eltype(x) === T
+
+    x = @compat Nullable{T}()
+    @test isnull(x) === true
+    @test eltype(x) === T
+
+    # julia#18484, generic isnull, unsafe_get
+    a = one(T)
+    x = @compat Nullable(a, true)
+    @test isequal(unsafe_get(x), a)
+
+    x = @compat Nullable{Array{T}}()
+    @test_throws UndefRefError unsafe_get(x)
+end
+
+@test xor(1,5) == 4
+@test 1 ⊻ 5 == 4
+
+# julia#19246
+@test numerator(1//2) === 1
+@test denominator(1//2) === 2
+
+# julia#19088
+let io = IOBuffer()
+    write(io, "aaa")
+    @test take!(io) == UInt8['a', 'a', 'a']
+    write(io, "bbb")
+    @test String(take!(io)) == "bbb"
+end
+
+# julia#17510
+let x = [1,2,3]
+    @compat x .= [3,4,5]
+    @test x == [3,4,5]
+    @compat x .= x .== 4
+    @test x == [0,1,0]
+    @compat x .= 7
+    @test x == [7,7,7]
+end
+
+let s = "Koala test: 🐨"
+    @test transcode(UInt16, s) == UInt16[75,111,97,108,97,32,116,101,115,116,58,32,55357,56360]
+    @test transcode(UInt32, s) == UInt32[75,111,97,108,97,32,116,101,115,116,58,32,128040]
+    for T in (UInt8,UInt16,UInt32,Cwchar_t)
+        @test transcode(Compat.String, transcode(T, s)) == s
+        @test transcode(UInt8, transcode(T, s)) == Vector{UInt8}(s)
+        @test transcode(T, s) == transcode(T, Vector{UInt8}(s)) == transcode(T, transcode(T, s))
+    end
+end
+
+# julia#17155, tests from Base Julia
+@test (uppercase∘hex)(239487) == "3A77F"
+let str = randstring(20)
+    @test filter(!isupper, str) == replace(str, r"[A-Z]", "")
+    @test filter(!islower, str) == replace(str, r"[a-z]", "")
+end
+
+# julia#19950, tests from Base (#20028)
+for T in (Float16, Float32, Float64, BigFloat, Int8, Int16, Int32, Int64, Int128,
+          BigInt, UInt8, UInt16, UInt32, UInt64, UInt128)
+    @test iszero(T(0))
+    @test iszero(Complex{T}(0))
+    if T<:Integer
+        @test iszero(Rational{T}(0))
+    end
+    if T<:AbstractFloat
+        @test iszero(T(-0.0))
+        @test iszero(Complex{T}(-0.0))
+    end
+end
+@test !iszero([0, 1, 2, 3])
+@test iszero([0, 0, 0, 0])
+
+x = view(1:10, 2:4)
+D = Diagonal(x)
+@test D[1,1] == 2
+@test D[3,3] == 4
+A = view(rand(5,5), 1:3, 1:3)
+@test D*A == Diagonal(copy(x)) * copy(A)
+@test A*D == copy(A) * Diagonal(copy(x))
+
+# julia#17623
+@static if VERSION >= v"0.5.0-dev+5509" # To work around unsupported syntax on Julia 0.4
+    @test [true, false] .& [true, true] == [true, false]
+    @test [true, false] .| [true, true] == [true, true]
+end
+
+# julia#20022
+@test !Compat.isapprox(NaN, NaN)
+@test Compat.isapprox(NaN, NaN, nans=true)
